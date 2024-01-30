@@ -1,0 +1,379 @@
+---
+- name: "Подготовка временного списка компьютеров (вместо hosts):"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: "Настраиваем временную группу для компьютера {{ desktop_ip }}:"
+      ansible.builtin.add_host:
+        groups: temp
+        hostname: "{{ desktop_ip }}"
+
+- name: "Основная часть: Установка MariaDB, Apache2, PHP и Nextcloud."
+  hosts: temp
+  gather_facts: true
+  become: true
+  become_user: root
+
+  vars:
+    nextcloud_user: theadmin # First user (admin) username
+    nextcloud_userpassword: firstuserpassword # First user (admin) password
+    nextcloud_adminemail: theadmin@acme.com
+    mariadb_database: nextcloud
+    mariadb_username: nextcloud
+    mariadb_password: nextcloud
+    arc_download_nextcloud: latest.tar.bz2
+    url_download_nextcloud: "https://download.nextcloud.com/server/releases/{{ arc_download_nextcloud }}"
+    dir_download_nextcloud: /tmp
+    path_project_nextcloud: /var/www/html
+    path_project_nextcloud_data: "{{ path_project_nextcloud }}/nextcloud/data"
+    path_project_nextcloud_config: "{{ path_project_nextcloud }}/nextcloud/config"
+    virtualhost_servername: nextcloud-server
+
+    packages:
+      apt:
+        mariadb:
+          - mariadb-server
+          - python3-mysqldb
+        apache2:
+          - apache2
+          # - apache2-mod_ssl
+          # - apache2-mod_php
+          - tzdata
+          - imagemagick
+        php:
+          - php
+          - libapache2-mod-php
+          - php-mysql
+          - php-curl
+          - php-gd
+          - php-xml
+          - php-mbstring
+          - php-zip
+          - php-intl
+          - php-ldap
+          - php-apcu
+          - php-gmp
+          - php-imagick
+          - php-bcmath
+          - php-bz2
+        memcached:
+          - memcached
+          - php-memcached
+          - php-apcu
+        cron:
+          - cron
+    modules:
+      apache2:
+        - ssl
+        - dir
+        - env
+        - headers
+        - mime
+        - rewrite
+
+  tasks:
+    - name: "Обновление кэша установщика пакетов:"
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: "Обновление установщика пакетов:"
+      ansible.builtin.apt:
+        upgrade: dist
+
+    - name: "Установка MariaDB:"
+      ansible.builtin.apt:
+        name: "{{ packages.apt.mariadb }}"
+        state: present
+
+    # - name: 'Установка MariaDB'
+    #   ansible.builtin.apt:
+    #     name:
+    #       - mariadb-server
+    #       - python3-module-mysqlclient
+    #     state: present
+    #     update_cache: true
+
+    - name: "Запуск и включение сервиса mariadb-server:"
+      ansible.builtin.systemd:
+        name: mariadb
+        state: started
+        enabled: true
+
+    - name: "Подготовка базы данных для Nextcloud: {{ mariadb_database }}:"
+      community.mysql.mysql_db:
+        name: "{{ mariadb_database }}"
+        encoding: utf8
+        collation: utf8_unicode_ci
+        state: present
+
+    - name: "Новый пользователь в базе данных для Nextcloud: {{ mariadb_username }}:"
+      community.mysql.mysql_user:
+        name: "{{ mariadb_username }}"
+        password: "{{ mariadb_password }}"
+        priv: "{{ mariadb_database }}.*:ALL,GRANT"
+        host: localhost
+        state: present
+
+    - name: "Установка веб-сервера Apache2 и его модулей:"
+      ansible.builtin.apt:
+        name: "{{ packages.apt.apache2 }}"
+        state: present
+
+    - name: "Установка PHP и его модулей:"
+      ansible.builtin.apt:
+        name: "{{ packages.apt.php }}"
+        state: present
+
+    - name: "Включение модулей Apache2:"
+      community.general.apache2_module:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - ssl
+        - dir
+        - env
+        - headers
+        - mime
+        - rewrite
+
+    - name: "Запуск и включение сервиса Apache2:"
+      ansible.builtin.systemd:
+        name: apache2
+        state: started
+        enabled: true
+
+    - name: "Загрузка архива Nextcloud с интернет-сайта проекта (во временную папку):"
+      ansible.builtin.get_url:
+        url: "{{ url_download_nextcloud }}"
+        dest: "{{ dir_download_nextcloud }}"
+        mode: "0644"
+
+    - name: "Распаковка архива Nextcloud в папку назначения:"
+      ansible.builtin.unarchive:
+        src: "{{ dir_download_nextcloud }}/{{ arc_download_nextcloud }}"
+        dest: "{{ path_project_nextcloud }}/"
+        # Обязательный параметр для распаковки на удалённом компьютере. Иначе Ansible пытается искать файл локально.
+        remote_src: true
+        owner: root
+
+    - name: "Создание подкаталога 'data' в папке назначения:"
+      ansible.builtin.file:
+        path: "{{ path_project_nextcloud }}/nextcloud/data"
+        state: directory
+        mode: "0644"
+
+    - name: "Установка необходимых прав доступа пользователю www-data (apache) на папку назначения:"
+      ansible.builtin.file:
+        path: "{{ path_project_nextcloud }}/nextcloud/"
+        recurse: true
+        owner: www-data
+        group: www-data
+
+    - name: "Установка прав пользователю www-data (apache) на подкаталоги в папке назначения:"
+      ansible.builtin.file:
+        path: "{{ path_project_nextcloud }}/nextcloud/{{ item }}"
+        recurse: true
+        owner: www-data
+        group: www-data
+      with_items:
+        - apps
+        - config
+        - data
+
+    - name: "Настройка виртуальной директории на веб-сервере для работы Nextcloud:"
+      ansible.builtin.copy:
+        dest: /etc/apache2/sites-available/nextcloud.conf
+        content: |
+          <VirtualHost *:80>
+            DocumentRoot {{ path_project_nextcloud }}/nextcloud/
+            ServerName {{ virtualhost_servername }}
+            Alias /nextcloud "{{ path_project_nextcloud }}/nextcloud/"
+            <Directory {{ path_project_nextcloud }}/nextcloud/>
+              Require all granted
+              AllowOverride All
+              Options FollowSymLinks MultiViews
+              Satisfy Any
+              <IfModule mod_dav.c>
+                Dav off
+              </IfModule>
+            </Directory>
+            ErrorLog ${APACHE_LOG_DIR}/error.log
+            CustomLog ${APACHE_LOG_DIR}/access.log combined
+          </VirtualHost>
+        mode: "0644"
+
+    - name: "Включение виртуальной директории Nextcloud:"
+      ansible.builtin.command: /usr/sbin/a2ensite nextcloud.conf
+
+    - name: "Отключение виртуальной директории по-умолчанию:"
+      ansible.builtin.command: /usr/sbin/a2dissite 000-default.conf
+
+    - name: "Перезапуска Apache:"
+      ansible.builtin.systemd:
+        name: apache2
+        state: restarted
+
+    - name: "(2) Установка статуса владельца пользователю www-data (apache) на папку назначения:"
+      ansible.builtin.file:
+        path: "{{ path_project_nextcloud }}/nextcloud/"
+        recurse: true
+        owner: www-data
+        group: www-data
+
+    - name: "(3) Установка необходимых прав доступа пользователю www-data (apache) на папку назначения:"
+      ansible.builtin.file:
+        path: "{{ path_project_nextcloud }}/nextcloud/"
+        recurse: true
+        mode: "0744"
+
+    - name: "Проверка наличия и создание, в случае отсутствия, файла .ocdata:"
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ path_project_nextcloud_data }}/.ocdata"
+        force: false
+        owner: www-data
+        mode: "0744"
+
+    # Экспериментальное :
+    # Первичная настройка Nextcloud(ВНИМАНИЕ: выполняется только один раз!):
+    - name: "Первичная настройка Nextcloud:"
+      become: true
+      become_user: www-data
+      ansible.builtin.shell:
+        cmd: >-
+          php occ maintenance:install
+          --database="mysql"
+          --data-dir={{ path_project_nextcloud_data | quote }}
+          --database-name={{ mariadb_database | quote }}
+          --database-user={{ mariadb_username | quote }}
+          --database-pass={{ mariadb_password | quote }}
+          --admin-user={{ nextcloud_user | quote }}
+          --admin-pass={{ nextcloud_userpassword | quote }}
+          --admin-email={{ nextcloud_adminemail | quote }}
+          --no-warnings --no-interaction
+      args:
+        # executable: /bin/bash
+        chdir: "{{ path_project_nextcloud }}/nextcloud/"
+      register: install_result
+
+    - name: "Результат первичной настройки:"
+      ansible.builtin.debug:
+        var: install_result.stdout_lines
+
+    - name: "Настройка Nextcloud: Включение доступа со всех узлов:"
+      # become: true
+      # become_user: root
+      ansible.builtin.lineinfile:
+        path: "{{ path_project_nextcloud_config }}/config.php"
+        search_string: "    0 => 'localhost'"
+        line: "    0 => '*'"
+
+    - name: "Настройка Nextcloud: Установка региона размещения сервера (RU):"
+      ansible.builtin.lineinfile:
+        path: "{{ path_project_nextcloud_config }}/config.php"
+        line: "  'default_phone_region' => 'RU',"
+        insertbefore: !unsafe "\\);" # Перед последней закрывающей скобкой (экранировано обратной косой чертой)
+
+    - name: "Настройка Nextcloud: Переключение на использование службы cron:"
+      become: true
+      become_user: www-data
+      ansible.builtin.shell:
+        cmd: >-
+          php occ
+          background:cron
+          --no-warnings --no-interaction
+      args:
+        # executable: /bin/bash
+        chdir: "{{ path_project_nextcloud }}/nextcloud/"
+
+    - name: "Настройка Nextcloud: Оптимизация БД:"
+      become: true
+      become_user: www-data
+      ansible.builtin.shell:
+        cmd: >-
+          php occ
+          db:convert-filecache-bigint
+          --no-warnings --no-interaction
+      args:
+        # executable: /bin/bash
+        chdir: "{{ path_project_nextcloud }}/nextcloud/"
+
+    - name: "Настройка PHP: Определение местоположения каталога с используемой версией PHP: "
+      ansible.builtin.find:
+        paths: /etc/php
+        file_type: directory
+        recurse: false
+      register: php_ini_path
+
+    - name: "Настройка PHP: Установка параметров в php.ini:"
+      community.general.ini_file:
+        path: "{{ php_ini_path.files[0].path }}/apache2/php.ini"
+        section: "{{ item.section }}"
+        option: "{{ item.option }}"
+        value: "{{ item.value }}"
+      with_items:
+        - { section: PHP, option: memory_limit, value: 512M }
+        - { section: PHP, option: upload_max_filesize, value: 4G }
+        - { section: opcache, option: opcache.enable_cli, value: 1 }
+        - {
+            section: opcache,
+            option: opcache.interned_strings_buffer,
+            value: 32,
+          }
+        - { section: opcache, option: opcache.revalidate_freq, value: 1 }
+
+    - name: "Установка memcached и вспомогательных компонентов:"
+      ansible.builtin.apt:
+        name: "{{ packages.apt.memcached }}"
+        state: present
+
+    - name: "Запуск и включение сервиса memcached:"
+      ansible.builtin.systemd:
+        name: memcached
+        state: started
+        enabled: true
+
+    - name: "Настройка Nextcloud: Включение кэширования в памяти (memcached)"
+      ansible.builtin.blockinfile:
+        path: "{{ path_project_nextcloud_config }}/config.php"
+        block: "{{ memcache_block | indent(width=2, first=true) }}"
+        insertbefore: !unsafe "\\);" # Перед последней закрывающей скобкой (экранировано обратной косой чертой)
+      vars:
+        memcache_block: |
+          'filelocking.enabled' => true,
+          'memcache.locking' => '\\OC\\Memcache\\Memcached',
+          'memcache.local' => '\OC\Memcache\Memcached',
+          'memcache.distributed' => '\OC\Memcache\Memcached',
+          'memcached_servers' => [
+            [ '127.0.0.1', 11211 ],
+          ],
+
+    - name: "Настройка: Перезапуск Apache для применения настроек:"
+      ansible.builtin.service:
+        name: apache2
+        state: reloaded
+
+    - name: "Установка cron и вспомогательных компонентов:"
+      ansible.builtin.apt:
+        name: "{{ packages.apt.cron }}"
+        state: present
+
+    - name: "Запуск и включение сервиса cron:"
+      ansible.builtin.systemd:
+        name: cron
+        state: started
+        enabled: true
+
+    - name: "Настройка cron: Добавление расписания от имени пользователя www-data"
+      ansible.builtin.cron:
+        user: www-data
+        name: Nextcloud maintenance
+        minute: "*"
+        hour: "*"
+        day: "*"
+        month: "*"
+        weekday: "*"
+        job: "/usr/bin/php {{ path_project_nextcloud }}/nextcloud/cron.php"
+        state: present
