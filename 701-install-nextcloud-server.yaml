@@ -317,11 +317,7 @@
         - { section: PHP, option: memory_limit, value: 512M }
         - { section: PHP, option: upload_max_filesize, value: 4G }
         - { section: opcache, option: opcache.enable_cli, value: 1 }
-        - {
-            section: opcache,
-            option: opcache.interned_strings_buffer,
-            value: 32,
-          }
+        - { section: opcache, option: opcache.interned_strings_buffer, value: 32 }
         - { section: opcache, option: opcache.revalidate_freq, value: 1 }
 
     - name: "Установка memcached и вспомогательных компонентов:"
