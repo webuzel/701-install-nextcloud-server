@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# v.2024-02-07
+
 # Для работы Ansible понадобится:
 # pip install
 #  wheel
@@ -103,6 +105,7 @@ if [[ -n $2 ]]; then
 	if [[ -n ${admin_pass} ]]; then
 		ssh_pass=${admin_pass}
 		ssh_user=${admin_username}
+		echo "******"
 	else
 		# Если пароль указан не был, то прервать выполнение скрипта
 		printf_color "${IRed}" "Пароль администратора не введён. Выход из скрипта."
